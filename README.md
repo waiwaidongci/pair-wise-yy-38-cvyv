@@ -29,10 +29,19 @@ python3 app.py --db ./data.db --port 8315
 - `POST /api/items`
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
+- `POST /api/items/{id}/records/{record_id}/close`，按记录类型限定关闭角色
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
 
-允许角色：duty_officer, chief_engineer, dispatcher, viewer。库位超过汛限或入库流量上升时提升紧迫度；授权前必须有复核记录，执行后仍要闭环现场反馈。
+允许角色：duty_officer, chief_engineer, dispatcher, viewer。库位超过汛限或入库流量上升时提升紧迫度。
+
+流转中接入复核与现场反馈：
+
+- 送审（`draft→checked`）必须提交`reviewer`（复核人）和`opinion`（复核意见），自动生成复核记录。
+- 复核记录关闭后（duty_officer）才能送总工授权（`checked→authorized`）。
+- 执行（`authorized→executed`）必须提交`contact`（现场联系人）和`discharge`（泄量），自动生成现场反馈记录。
+- 反馈记录未关闭（dispatcher 关闭）不能归档（`executed→closed`）。
+- 归档后列表和详情通过`reviewer`、`last_feedback_by`展示复核人和最后反馈人。
 
 ## 测试
 

@@ -141,6 +141,30 @@ class Repository:
             row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
         return dict(row)
 
+    def get_record(self, item_id: int, record_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM records WHERE id=? AND item_id=?", (record_id, item_id)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("记录不存在")
+        return dict(row)
+
+    def close_record(self, item_id: int, record_id: int) -> Dict[str, Any]:
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE records SET status='closed' WHERE id=? AND item_id=? AND status='open'",
+                (record_id, item_id),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM records WHERE id=? AND item_id=?", (record_id, item_id)
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError("记录不存在")
+                raise ConflictError("记录已关闭")
+        return self.get_record(item_id, record_id)
+
     def list_records(self, item_id: int) -> List[Dict[str, Any]]:
         self.get_item(item_id)
         with self._lock:
@@ -149,13 +173,31 @@ class Repository:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def open_record_count(self, item_id: int) -> int:
+    def open_record_count(self, item_id: int, kind: Optional[str] = None) -> int:
+        sql = "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND status='open'"
+        params: list = [item_id]
+        if kind is not None:
+            sql += " AND kind=?"
+            params.append(kind)
+        with self._lock:
+            row = self.conn.execute(sql, tuple(params)).fetchone()
+        return int(row["n"])
+
+    def closed_record_count(self, item_id: int, kind: str) -> int:
         with self._lock:
             row = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND status='open'",
-                (item_id,),
+                "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND kind=? AND status='closed'",
+                (item_id, kind),
             ).fetchone()
         return int(row["n"])
+
+    def latest_record_by_kind(self, item_id: int, kind: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM records WHERE item_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                (item_id, kind),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:
