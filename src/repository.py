@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
-from .rules import ID_PREFIX, STATES
+from .rules import FEEDBACK_KIND, ID_PREFIX, REVIEW_KIND, STATES
 
 
 class Repository:
@@ -52,6 +52,10 @@ class Repository:
                     external_ref TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    reviewer TEXT,
+                    opinion TEXT,
+                    contact TEXT,
+                    discharge REAL,
                     UNIQUE(item_id, external_ref)
                 );
                 CREATE TABLE IF NOT EXISTS audit_events (
@@ -66,6 +70,15 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+        self._migrate_records()
+
+    def _migrate_records(self) -> None:
+        with self._lock, self.conn:
+            columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(records)")}
+            for column, ddl in (("reviewer", "TEXT"), ("opinion", "TEXT"),
+                                ("contact", "TEXT"), ("discharge", "REAL")):
+                if column not in columns:
+                    self.conn.execute(f"ALTER TABLE records ADD COLUMN {column} {ddl}")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -124,19 +137,42 @@ class Repository:
         return self.get_item(item_id)
 
     def add_record(self, item_id: int, kind: str, detail: str, status: str,
-                   external_ref: Optional[str], actor: str) -> Dict[str, Any]:
+                   external_ref: Optional[str], actor: str,
+                   reviewer: Optional[str] = None, opinion: Optional[str] = None,
+                   contact: Optional[str] = None,
+                   discharge: Optional[float] = None) -> Dict[str, Any]:
         now = utc_now()
         self.get_item(item_id)
         try:
             with self._lock, self.conn:
                 cur = self.conn.execute(
                     """INSERT INTO records(item_id, kind, detail, status, external_ref,
-                       created_by, created_at) VALUES(?,?,?,?,?,?,?)""",
-                    (item_id, kind, detail, status, external_ref, actor, now),
+                       created_by, created_at, reviewer, opinion, contact, discharge)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (item_id, kind, detail, status, external_ref, actor, now,
+                     reviewer, opinion, contact, discharge),
                 )
                 record_id = int(cur.lastrowid)
         except sqlite3.IntegrityError as exc:
             raise ConflictError("记录唯一标识已存在") from exc
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        return dict(row)
+
+    def close_record(self, item_id: int, record_id: int) -> Dict[str, Any]:
+        self.get_item(item_id)
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE records SET status='closed' WHERE id=? AND item_id=? AND status='open'",
+                (record_id, item_id),
+            )
+            if cur.rowcount == 0:
+                row = self.conn.execute(
+                    "SELECT 1 FROM records WHERE id=? AND item_id=?", (record_id, item_id)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError("记录不存在")
+                raise ConflictError("记录已关闭")
         with self._lock:
             row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
         return dict(row)
@@ -156,6 +192,42 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def record_counts(self, item_id: int) -> Dict[str, int]:
+        counts = {"open": 0, "open_review": 0, "closed_review": 0,
+                  "open_feedback": 0, "closed_feedback": 0}
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT kind, status, COUNT(*) AS n FROM records
+                   WHERE item_id=? GROUP BY kind, status""",
+                (item_id,),
+            ).fetchall()
+        for row in rows:
+            n = int(row["n"])
+            if row["status"] == "open":
+                counts["open"] += n
+            if row["kind"] == REVIEW_KIND:
+                counts["open_review" if row["status"] == "open" else "closed_review"] += n
+            elif row["kind"] == FEEDBACK_KIND:
+                counts["open_feedback" if row["status"] == "open" else "closed_feedback"] += n
+        return counts
+
+    def record_summary(self, item_id: int) -> Dict[str, Optional[str]]:
+        with self._lock:
+            review = self.conn.execute(
+                """SELECT reviewer FROM records WHERE item_id=? AND kind=?
+                   ORDER BY id DESC LIMIT 1""",
+                (item_id, REVIEW_KIND),
+            ).fetchone()
+            feedback = self.conn.execute(
+                """SELECT created_by FROM records WHERE item_id=? AND kind=?
+                   ORDER BY id DESC LIMIT 1""",
+                (item_id, FEEDBACK_KIND),
+            ).fetchone()
+        return {
+            "reviewer": review["reviewer"] if review else None,
+            "last_feedback_by": feedback["created_by"] if feedback else None,
+        }
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

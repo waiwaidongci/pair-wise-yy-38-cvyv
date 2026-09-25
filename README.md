@@ -25,14 +25,15 @@ python3 app.py --db ./data.db --port 8315
 ## 主要接口
 
 - `GET /health`
-- `GET /api/items`
+- `GET /api/items`，列表含复核人`reviewer`和最后反馈人`last_feedback_by`
 - `POST /api/items`
 - `GET /api/items/{id}`
-- `POST /api/items/{id}/records`
+- `POST /api/items/{id}/records`，`kind=review`须登记`reviewer`（复核人）和`opinion`（意见）；`kind=feedback`须登记`contact`（现场联系人）和`discharge`（泄量），且指令执行后才能登记
+- `POST /api/items/{id}/records/{rid}/close`，关闭复核或反馈记录
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
 
-允许角色：duty_officer, chief_engineer, dispatcher, viewer。库位超过汛限或入库流量上升时提升紧迫度；授权前必须有复核记录，执行后仍要闭环现场反馈。
+允许角色：duty_officer, chief_engineer, dispatcher, viewer。库位超过汛限或入库流量上升时提升紧迫度；授权前必须有已关闭的复核记录，执行后现场反馈未关闭不能归档。
 
 ## 测试
 

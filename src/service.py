@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import ConflictError, ensure_role, normalize_severity, require_number, require_text
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
-                    validate_transition)
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, FEEDBACK_ALLOWED_STATES,
+                    FEEDBACK_KIND, RECORD_ROLES, REVIEW_KIND, TITLE, VIEW_ROLES,
+                    authorization_blockers, completion_blockers,
+                    escalation_required, priority_score, response_deadline_hours,
+                    role_for_transition, validate_transition)
 
 
 class Service:
@@ -48,10 +49,32 @@ class Service:
         external_ref = payload.get("external_ref")
         if external_ref is not None:
             external_ref = require_text(external_ref, "external_ref", 100)
+        reviewer = opinion = contact = None
+        discharge = None
+        if kind == REVIEW_KIND:
+            reviewer = require_text(payload.get("reviewer"), "reviewer", 100)
+            opinion = require_text(payload.get("opinion"), "opinion")
+        elif kind == FEEDBACK_KIND:
+            contact = require_text(payload.get("contact"), "contact", 100)
+            discharge = require_number(payload.get("discharge"), "discharge")
+            item = self.repository.get_item(item_id)
+            if item["status"] not in FEEDBACK_ALLOWED_STATES:
+                raise ConflictError("指令执行后才能登记现场反馈")
         record = self.repository.add_record(item_id, kind, detail, status,
-                                            external_ref, actor)
+                                            external_ref, actor, reviewer,
+                                            opinion, contact, discharge)
         self.repository.append_audit("record", ENTITY, item_id, actor, {
             "record_id": record["id"], "kind": kind, "status": status,
+        })
+        return record
+
+    def close_record(self, item_id: int, record_id: int, actor: str,
+                     role: str) -> Dict[str, Any]:
+        ensure_role(role, RECORD_ROLES)
+        actor = require_text(actor, "actor", 100)
+        record = self.repository.close_record(item_id, record_id)
+        self.repository.append_audit("record_close", ENTITY, item_id, actor, {
+            "record_id": record["id"], "kind": record["kind"],
         })
         return record
 
@@ -63,9 +86,13 @@ class Service:
         ensure_role(role, role_for_transition(target))
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
-        blockers = completion_blockers(target, self.repository.open_record_count(item_id))
+        counts = self.repository.record_counts(item_id)
+        blockers = authorization_blockers(target, counts["open_review"],
+                                          counts["closed_review"])
+        blockers += completion_blockers(target, counts["open"],
+                                        counts["open_feedback"],
+                                        counts["closed_feedback"])
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
         self.repository.append_audit("transition", ENTITY, item_id, actor, {
@@ -91,8 +118,7 @@ class Service:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
 
-    @staticmethod
-    def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
+    def enrich(self, item: Dict[str, Any]) -> Dict[str, Any]:
         result = dict(item)
         result["priority"] = priority_score(
             item["severity"], item["quantity"], item["threshold"])
@@ -100,4 +126,7 @@ class Service:
             item["severity"], item["quantity"], item["threshold"])
         result["escalation_required"] = escalation_required(
             item["severity"], item["quantity"], item["threshold"])
+        summary = self.repository.record_summary(item["id"])
+        result["reviewer"] = summary["reviewer"]
+        result["last_feedback_by"] = summary["last_feedback_by"]
         return result

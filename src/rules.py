@@ -2,6 +2,7 @@ from __future__ import annotations
 from .domain import ConflictError, ValidationError
 TITLE='水库防汛调度与操作确认'; ENTITY='调度指令'; ID_PREFIX='RF'
 SEVERITIES=['routine', 'attention', 'urgent', 'emergency']; STATES=['draft', 'checked', 'authorized', 'executed', 'closed']; TRANSITIONS={'draft': ['checked'], 'checked': ['authorized'], 'authorized': ['executed'], 'executed': ['closed'], 'closed': []}; TRANSITION_ROLES={'checked': ['duty_officer'], 'authorized': ['chief_engineer'], 'executed': ['dispatcher'], 'closed': ['chief_engineer']}
+REVIEW_KIND='review'; FEEDBACK_KIND='feedback'; FEEDBACK_ALLOWED_STATES=set(['executed'])
 CREATE_ROLES=set(['duty_officer']); RECORD_ROLES=set(['duty_officer', 'dispatcher']); AUDIT_ROLES=set(['chief_engineer', 'viewer']); VIEW_ROLES=set(['duty_officer', 'chief_engineer', 'dispatcher', 'viewer'])
 SEVERITY_WEIGHT={'routine': 1.0, 'attention': 3.0, 'urgent': 6.0, 'emergency': 9.0}; DEADLINE_HOURS={'routine': 72, 'attention': 24, 'urgent': 8, 'emergency': 4}; TERMINAL_STATES=set(['closed'])
 def priority_score(severity,quantity=0.0,threshold=1.0,open_records=0):
@@ -18,5 +19,17 @@ def can_transition(current,target): return target in TRANSITIONS.get(current,[])
 def validate_transition(current,target):
     if current not in STATES or target not in STATES: raise ValidationError("未知状态")
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
-def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
+def authorization_blockers(target,open_reviews,closed_reviews):
+    if target!='authorized': return []
+    blockers=[]
+    if closed_reviews<1: blockers.append("授权前必须有已关闭的复核记录")
+    if open_reviews>0: blockers.append("仍有未关闭的复核记录")
+    return blockers
+def completion_blockers(target,open_records,open_feedback=0,closed_feedback=0):
+    if target not in TERMINAL_STATES: return []
+    blockers=[]
+    if closed_feedback<1: blockers.append("归档前必须登记并关闭现场反馈")
+    if open_feedback>0: blockers.append("仍有未关闭的现场反馈")
+    if open_records-open_feedback>0: blockers.append("仍有未关闭事项")
+    return blockers
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
